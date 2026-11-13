@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-bundle="__GH_BUNDLE_VERSION__">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -383,6 +383,9 @@
   .st-body { position: absolute; left: 4.8rem; right: 4.8rem; top: 12.4rem; bottom: 12rem; }
   .st-panel { position: absolute; inset: 0; opacity: 0; visibility: hidden; transform: translateY(.8rem); transition: opacity .16s, transform .2s var(--ease), visibility 0s .2s; display: grid; grid-template-columns: 86rem 1fr; column-gap: 6rem; align-content: start; }
   .st-panel.on { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
+  /* An active graphics tab must not intercept input after its page closes. */
+  .page:not(.on) { pointer-events: none; }
+  .page:not(.on) .st-panel { visibility: hidden; pointer-events: none; }
   .st-rows { display: flex; flex-direction: column; gap: .4rem; }
   .row { display: grid; grid-template-columns: 30rem 1fr 7rem; align-items: center; height: 5.2rem; padding: 0 2rem; background: linear-gradient(90deg, rgba(255, 255, 255, .055), rgba(255, 255, 255, .015)); border-left: .3rem solid transparent; outline: none; transition: background .12s, border-color .12s; }
   .row:focus-within, .row:hover { border-left-color: var(--or); background: linear-gradient(90deg, rgba(255, 138, 42, .2), rgba(255, 255, 255, .02)); }
@@ -513,6 +516,7 @@
   @media (max-aspect-ratio: 3/2) { .slot { width: 22rem; } .slot[data-slot=optic] { margin-left: -11rem; } .slot .sk { letter-spacing: .14em; } #pg-gunsmith .tb-keys, #pg-gunsmith .tab em { display: none; } #pg-gunsmith .tab { padding: 0 1.2rem; } }
   #err { position: fixed; left: 0; right: 0; bottom: 0; background: #400; color: #fcc; font: 12px/1.4 Consolas, monospace; padding: 8px 12px; white-space: pre-wrap; z-index: 99; letter-spacing: 0; text-transform: none; }
 </style>
+<link rel="stylesheet" href="./client/pvp.css">
 </head>
 <body>
 <canvas id="c"></canvas>
@@ -576,8 +580,6 @@
 </div>
 
 <script src="./i18n-zh.js"></script>
-<script>{ const b = new URLSearchParams(location.search).get('b'); const s = document.createElement('script'); s.src = b ? 'dist/game-' + b.replace(/[^a-z0-9]/gi, '') + '.js' : 'dist/game.js'; document.body.appendChild(s); }</script>
-
-
+<script type="module" src="./client/bootstrap.js"></script>
 </body>
 </html>
