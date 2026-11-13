@@ -1,11 +1,11 @@
 # Golden Hour PvP protocol v1
 
-Endpoint: `https://<host>/connect`. TLS 1.3 and HTTP/3 over UDP are mandatory. TCP HTTPS serves the page and config; localhost development additionally serves HTTP on 8080. No WebSocket or polling transport is used.
+Preferred endpoint: `https://<host>/connect`, WebTransport over HTTP/3 and TLS 1.3. WebRTC DataChannel is the fallback when the browser lacks WebTransport or its connection fails. Both terminate at the same authoritative Go hub; players using different transports can share rooms. TCP HTTPS serves the page, config and WebRTC signaling; localhost development additionally serves HTTP on 8080. No WebSocket or polling transport is used.
 
 ## Lifecycle and authority
 
 1. Fetch `/api/config` for the endpoint and, in development only, its pinned SHA-256 certificate hash.
-2. Open a WebTransport session and one client-created bidirectional stream. Immediately write `hello` so the stream is visible to the server.
+2. Open a WebTransport session and one client-created bidirectional stream, or the two WebRTC channels described below. Immediately write `hello` so the stream is visible to the server.
 3. Reliable frames are UTF-8 JSON lines, capped at 16 KiB. The initial hello is capped at 2 KiB and must arrive within 10 seconds.
 4. `welcome` contains the server-assigned player ID, room code, unpredictable resume credential, and canonical weapon configuration. Never include the resume credential in an invitation URL.
 5. Datagram input contains intent only. The 60 Hz server clock advances simulation; additional packets do not advance time. At 30 Hz a new snapshot replaces any older pending snapshot instead of blocking the tick.
@@ -20,6 +20,25 @@ The client detects either `datagrams.writable` or the newer `datagrams.createWri
 Tests inspect initial credit SETTINGS received over real HTTP/3, run a match with modern flow-controlled and legacy peers, and exercise stalled connection stages, bounded cleanup, retries and the newer datagram API with ArrayBuffer snapshots.
 
 Manual verification on macOS Safari 27.0 at `http://localhost:8080/`: created a room with one human and nine server bots, readied and started a match, moved and fired (magazine 30 → 25), observed live scores, then left and verified room cleanup. The previously stalled connection also restored both join buttons on timeout.
+
+## WebRTC fallback
+
+`/api/config` includes `rtc.url` (same-origin `/api/rtc/offer`) and `rtc.iceServers`. A browser without WebTransport selects RTC immediately. A failed WebTransport connection attempts RTC, while application errors such as an invalid room do not trigger fallback. Each attempt has the same 12-second deadline, including ICE gathering, signaling, channel readiness and welcome. Aborting closes the peer connection and pending fetch/listeners. `?transport=webrtc` forces this path for manual testing.
+
+The browser creates an RTCPeerConnection and two channels, both with protocol `gh-pvp-v1`:
+
+| Label | Delivery | Payload |
+|---|---|---|
+| `reliable` | Ordered, reliable | The existing UTF-8 JSON lines, including hello, commands and events |
+| `state` | Unordered, `maxRetransmits: 0` | The existing 25-byte input and 664-byte maximum snapshot |
+
+After local ICE gathering completes, POST the SDP offer JSON (`type`, `sdp`) to `rtc.url` with `Content-Type: application/json`; the answer includes gathered server candidates. Signaling uses exact Origin validation, a 64 KiB request bound, a 5-second server gathering deadline and the shared 256-session capacity. The first hello must arrive within 15 seconds. Unknown/duplicate channels, wrong reliability or protocol, oversize messages and overflowing queues close the session. Reliable outgoing buffered bytes are bounded at 64 KiB; state packets are dropped above 8 KiB instead of accumulating stale state. The Go tick never waits for SCTP delivery.
+
+ICE / DTLS / SCTP terminate at Go (Pion); this is not player-to-player networking. A shared UDP ICE socket uses port 8444 by default, configurable with `-rtc-addr`. `-rtc-public-ip` advertises a public IP behind NAT; the external and internal UDP port must match. Optional `GH_ICE_SERVERS` / `-ice-servers` supplies STUN/TURN to both endpoints for restricted networks. TURN infrastructure is external. Public deployments still require trusted HTTPS for signaling and secure browser APIs.
+
+Real transport tests cover a WT/RTC mixed match, binary input acknowledgements and snapshots over both lanes, authoritative damage/kill/winner events, WT-to-RTC credential resume, RTC-only room creation with nine bots, leave cleanup, and rejected signaling requests. Client tests cover missing/failed/healthy WT, forced RTC, application errors, ICE/signaling/channel deadlines and backpressure.
+
+Manual RTC verification on macOS Safari 27.0 at `http://localhost:8080/?transport=webrtc`: native room status showed WebRTC and one human / nine bots; readied, started, moved, fired (magazine 30 → 25) and observed changing scores. Leaving returned to the original menu and `/api/health` showed zero players / zero rooms. Public NAT/TURN paths require deployment-specific verification.
 
 ## Reliable messages
 

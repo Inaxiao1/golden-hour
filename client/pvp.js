@@ -174,7 +174,7 @@ function resume(drag = false) {
   else engine.lock();
 }
 function status(value) {
-  label("online-status", value);
+  label("online-status", value + (net.writer && net.metrics.transport ? ` · ${net.metrics.transport === "webrtc" ? "WebRTC" : "WebTransport"}` : ""));
 }
 function error(value) {
   label("online-error", value);
@@ -204,6 +204,7 @@ async function join(create) {
     });
     if (!response.ok) throw Error("联机服务未启动，请通过 Go 服务打开游戏。");
     const config = await response.json();
+    if (query.get("transport") === "webrtc") config.preferredTransport = "webrtc";
     await engine.enter(ctx.settings.primary);
     const name = $("online-name").value.trim() || "干员";
     try {

@@ -1,3 +1,5 @@
+import { RTCTransport } from "./webrtc.js";
+
 const PHASES = ["lobby", "countdown", "live", "over"];
 export const WEAPONS = ["ar", "smg", "shotgun", "pistol"];
 const INPUT_BYTES = 25;
@@ -117,15 +119,30 @@ export class Connection extends EventTarget {
     this.dispatchEvent(new CustomEvent(type, { detail }));
   }
   checkSupport() {
-    if (typeof globalThis.WebTransport !== "function")
+    if (typeof globalThis.WebTransport !== "function" && typeof globalThis.RTCPeerConnection !== "function")
       throw Error(
-        "当前浏览器不支持 WebTransport，请使用最新版本的 Chrome、Edge 或支持 WebTransport 的浏览器。",
+        "当前浏览器不支持 WebTransport 或 WebRTC，请更新浏览器后重试。",
       );
     if (!globalThis.isSecureContext)
       throw Error("联机需要 HTTPS。开发时请使用本机 localhost 地址。");
   }
   async connect(hello, config) {
     this.checkSupport();
+    const rtc = config.rtc && typeof globalThis.RTCPeerConnection === "function";
+    const kind = config.preferredTransport === "webrtc" || typeof globalThis.WebTransport !== "function" ? "webrtc" : "webtransport";
+    if (kind === "webrtc" && !rtc) throw Error("服务器或浏览器未提供 WebRTC 连接支持。");
+    const attempt = this.generation + 1;
+    try {
+      await this.connectAttempt(hello, config, kind);
+    } catch (error) {
+      if (this.generation !== attempt + 1 || kind !== "webtransport" || !rtc || error.application || this.intentional) throw error;
+      this.emit("status", "正在切换备用连接…");
+      // A late welcome may already have assigned a room. Resume it so a
+      // transport change cannot create a second player or an abandoned room.
+      await this.connectAttempt(this.hello?.resume ? this.hello : hello, config, "webrtc");
+    }
+  }
+  async connectAttempt(hello, config, kind) {
     this.intentional = false;
     this.hello = { ...hello };
     this.config = config;
@@ -147,7 +164,7 @@ export class Connection extends EventTarget {
       if (generation !== this.generation) throw Error("连接已取消。");
     };
     try {
-      wt = new WebTransport(config.url, options);
+      wt = kind === "webrtc" ? new RTCTransport(config.rtc) : new WebTransport(config.url, options);
       this.transport = wt;
       wt.closed.catch(() => {});
       // One deadline covers TLS, stream creation, the hello write and welcome.
@@ -179,6 +196,7 @@ export class Connection extends EventTarget {
       }, this.connectTimeoutMs, "连接超时：请重试，并检查服务器 UDP 端口与证书配置。");
       this.handshake = null;
       this.retry = 0;
+      this.metrics.transport = kind;
       this.emit("status", "已连接");
       wt.closed.then(
         () => this.closed(generation),
@@ -248,8 +266,11 @@ export class Connection extends EventTarget {
             this.latestTick = 0;
             this.handshake?.resolve();
           }
-          if (e.type === "error" && this.handshake?.generation === generation)
-            this.handshake.reject(Error(e.message));
+          if (e.type === "error" && this.handshake?.generation === generation) {
+            const error = Error(e.message);
+            error.application = true;
+            this.handshake.reject(error);
+          }
           if (e.type === "left") this.leftResolve?.();
           this.emit("event", e);
         }
@@ -334,5 +355,6 @@ export class Connection extends EventTarget {
     this.id = null;
     this.hello = null;
     this.sendChain = Promise.resolve();
+    this.metrics.transport = null;
   }
 }

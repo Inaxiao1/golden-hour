@@ -13,6 +13,6 @@ COPY index.html i18n-zh.js ./
 COPY dist ./dist
 COPY client ./client
 COPY assets ./assets
-EXPOSE 8443/tcp 8443/udp
+EXPOSE 8443/tcp 8443/udp 8444/udp
 ENTRYPOINT ["/server"]
 CMD ["-http-addr="]

@@ -1,6 +1,6 @@
 # 暮色酒店 · GOLDEN HOUR PvP
 
-基于酒店 3D 原型，新增 Go + 原生 WebTransport / HTTP/3 房间制团队死斗。服务端决定玩家位置、命中、伤害、弹药、重生与比分；没有 WebSocket 替代链路。
+基于酒店 3D 原型，新增 Go 房间制团队死斗，优先使用原生 WebTransport / HTTP/3；不支持或建链失败时自动切换 WebRTC DataChannel。服务端决定玩家位置、命中、伤害、弹药、重生与比分。
 
 ## 本地试玩
 
@@ -19,6 +19,8 @@ go run ./cmd/server
 限制鼠标锁定的内嵌窗口会自动切换到拖动瞄准，避免开局停在暂停页；按住鼠标拖动视角。独立浏览器使用标准 Pointer Lock。移动端触屏双摇杆尚未实现。
 
 联机客户端兼容 `datagrams.writable` 和 Safari 较新的 `datagrams.createWritable()` 接口，并接收 TypedArray / ArrayBuffer 快照。服务器显式通告 WebTransport 会话的初始流与数据额度，避免 Safari 在握手后一直等待流创建。配置请求最多等待 5 秒，完整联机建链最多 12 秒；失败后恢复按钮，退出操作最多等待 500 毫秒，不会因挂起的网络写入一直置灰。
+
+WebTransport 不可用时自动使用 WebRTC；WebTransport 建链失败后也会尝试 WebRTC，每次建链分别限制 12 秒。房间不存在等业务错误直接提示，不切换连接重复请求。WebRTC 的可靠通道传房间和战斗事件，无序且不重传的通道传输入与快照；两种连接的玩家可以同房对战，继续由 Go 服务端裁决。房间状态会显示实际连接方式。需要单独验证兜底时，可打开 `http://localhost:8080/?transport=webrtc`。
 
 ## 已实现
 
@@ -63,11 +65,12 @@ PvP 的规则与模拟代码均为新增。`dist/game.js` 提供原型的原生�
 
 ```text
 cmd/server/              Go 启动入口、配置、退出信号
-internal/transport/      HTTP/3、WebTransport、可靠流、数据报、连接生命周期
+internal/transport/      HTTP/3、WebTransport、WebRTC 信令与 DataChannel、连接生命周期
 internal/game/           房间、服务端模拟、命中与比赛、二进制协议
 internal/game/maps/      酒店 735 个静态碰撞体与 119 个导航节点（嵌入 Go 二进制）
 internal/certutil/        开发证书生成、复用和指纹
-client/net.js            原生浏览器 WebTransport 客户端
+client/net.js            连接选择、重连、共享协议与预测接入
+client/webrtc.js         WebRTC 双 DataChannel 适配、背压与取消
 client/simulation.js     与 Go 同步的固定步长预测
 client/engine.js         3D 原型适配、远端角色、武器反馈
 client/telemetry.js      自动画质、帧耗时与显卡诊断、小地图/装饰物降频
@@ -96,11 +99,11 @@ mkdir -p bin
 CGO_ENABLED=0 go build -buildvcs=false -trimpath -o bin/golden-hour-server ./cmd/server
 ```
 
-测试覆盖真实 UDP QUIC / HTTP/3 两客户端联机、可靠消息与数据报、命中击杀结算、会话恢复、退出确认、跨源拒绝，以及人机补位、真人替换、单人开局、人机交火与遮挡、酒店寻路、房间、物理、枪械和 Go/JS 预测一致性。race 检查需要本机 C 编译器。
+测试覆盖真实 QUIC / HTTP/3 两客户端联机、WebTransport 与 WebRTC 混合对战、真实 ICE / DTLS / SCTP、WebRTC 单人开局和九个人机、可靠事件与二进制输入快照、命中击杀结算、跨传输会话恢复、退出确认、信令跨源与非法请求拒绝，以及人机、物理、枪械和 Go/JS 预测一致性。浏览器单元测试还覆盖自动切换、建链超时、资源取消和发送队列上限。race 检查需要本机 C 编译器。
 
 ## 公网运行
 
-使用受信任 CA 签发的域名证书，直接同时开放 **TCP 和 UDP 的同一个端口**。普通 HTTP 反向代理不会自动代理 WebTransport。
+使用受信任 CA 签发的域名证书，为 WebTransport 同时开放 **TCP 和 UDP 的同一个端口**，并为 WebRTC 开放 **UDP 8444**（`-rtc-addr` 可改）。普通 HTTP 反向代理不会自动代理 WebTransport，也不会代理 WebRTC 的 ICE 数据端口；`/api/rtc/offer` 是同源 HTTPS 信令接口，可以随页面通过反向代理。
 
 ```sh
 ./bin/golden-hour-server \
@@ -108,21 +111,32 @@ CGO_ENABLED=0 go build -buildvcs=false -trimpath -o bin/golden-hour-server ./cmd
   -http-addr= \
   -public-url=https://game.example.com \
   -origins=https://game.example.com \
+  -rtc-addr=:8444 \
+  -rtc-public-ip=203.0.113.10 \
   -cert=/etc/golden-hour/fullchain.pem \
   -key=/etc/golden-hour/privkey.pem
 ```
 
-游戏页、`/api/config` 和 `/connect` 由同一个 Go 进程提供。正式证书模式不返回开发指纹，并要求关闭明文 HTTP 开发端口。HTTPS 页面需要由支持原生 WebTransport 的浏览器打开；不支持时会显示明确提示。
+将示例 `203.0.113.10` 替换为服务器实际公网 IP；直接绑定公网 IP 的主机可省略 `-rtc-public-ip`，位于 NAT / Docker 后时需设置，并将公网 UDP 端口原样映射到 `-rtc-addr`。游戏页、`/api/config`、`/connect` 和 `/api/rtc/offer` 由同一个 Go 进程提供。正式证书模式不返回开发指纹，并要求关闭明文 HTTP 开发端口。浏览器需支持 WebTransport 或 WebRTC，且页面必须使用 HTTPS（本机 localhost 除外）。
+
+只配置直连不能穿过所有网络限制。需要 TURN 中继时，通过 `GH_ICE_SERVERS` 环境变量或 `-ice-servers` 设置标准 ICE server JSON，例如：
+
+```sh
+export GH_ICE_SERVERS='[{"urls":["stun:turn.example.com:3478"]},{"urls":["turns:turn.example.com:5349?transport=tcp"],"username":"short-lived-user","credential":"short-lived-secret"}]'
+```
+
+该配置会下发浏览器并用于 Go 端 ICE；请使用可供游戏客户端使用的限时 TURN 凭据。TURN 服务需另行部署，实际可达性取决于该服务和网络配置。
 
 Docker 示例（证书目录须对容器运行用户可读）：
 
 ```sh
 docker build -t golden-hour .
-docker run --rm -p 8443:8443/tcp -p 8443:8443/udp \
+docker run --rm -p 8443:8443/tcp -p 8443:8443/udp -p 8444:8444/udp \
   -v /etc/golden-hour:/certs:ro golden-hour \
   -addr=:8443 -http-addr= \
   -public-url=https://game.example.com:8443 \
   -origins=https://game.example.com:8443 \
+  -rtc-public-ip=203.0.113.10 \
   -cert=/certs/fullchain.pem -key=/certs/privkey.pem
 ```
 

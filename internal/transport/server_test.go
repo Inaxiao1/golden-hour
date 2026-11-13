@@ -53,6 +53,20 @@ func (c *client) event(t *testing.T, kind string) map[string]any {
 func (c *client) close() { c.sess.CloseWithError(0, ""); c.transport.Close() }
 
 func TestRealWebTransportTwoClients(t *testing.T) {
+	runTransportMatch(t, false)
+}
+
+func TestMixedWebTransportAndWebRTC(t *testing.T) {
+	runTransportMatch(t, true)
+}
+
+type reliableClient interface {
+	send(*testing.T, any)
+	event(*testing.T, string) map[string]any
+	close()
+}
+
+func runTransportMatch(t *testing.T, mixed bool) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +182,12 @@ func TestRealWebTransportTwoClients(t *testing.T) {
 	code := welcome["room"].(string)
 	id := uint32(welcome["id"].(float64))
 	resume := welcome["resume"].(string)
-	b := dial(game.Hello{Type: "hello", Room: code, Name: "Bob"})
+	var b reliableClient
+	if mixed {
+		b = dialRTC(t, httpClient, origin, game.Hello{Type: "hello", Room: code, Name: "Bob"})
+	} else {
+		b = dial(game.Hello{Type: "hello", Room: code, Name: "Bob"})
+	}
 	defer b.close()
 	wb := b.event(t, "welcome")
 	bid := uint32(wb["id"].(float64))
@@ -241,10 +260,20 @@ func TestRealWebTransportTwoClients(t *testing.T) {
 			}
 		}
 	}
+	if mixed {
+		rtc := b.(*rtcTestClient)
+		binary.LittleEndian.PutUint32(data[4:], 7)
+		if err := rtc.state.Send(data); err != nil {
+			t.Fatal(err)
+		}
+		rtc.ack(t, bid, 7)
+	}
 	// Stop movement, aim at the other player, and confirm damage/kill over reliable QUIC streams.
 	hub.Lock()
 	p.Motion = game.Motion{Pos: game.Vec{}, Ground: true}
 	p.Input = game.Input{}
+	q.Input = game.Input{}
+	q.Motion = game.Motion{Pos: game.Vec{Z: -10}, Ground: true}
 	p.FireAt = 0
 	hub.Unlock()
 	a.send(t, game.Command{Type: "shot"})
@@ -259,7 +288,12 @@ func TestRealWebTransportTwoClients(t *testing.T) {
 		t.Fatal("wrong winner", end)
 	}
 	a.close()
-	restored := dial(game.Hello{Type: "hello", Room: code, Resume: resume})
+	var restored reliableClient
+	if mixed {
+		restored = dialRTC(t, httpClient, origin, game.Hello{Type: "hello", Room: code, Resume: resume})
+	} else {
+		restored = dial(game.Hello{Type: "hello", Room: code, Resume: resume})
+	}
 	defer restored.close()
 	wr := restored.event(t, "welcome")
 	if wr["id"] != float64(id) {
@@ -281,6 +315,12 @@ func TestRealWebTransportTwoClients(t *testing.T) {
 	hub.Unlock()
 	if !removed {
 		t.Fatal("acknowledged leave retained the player")
+	}
+	if mixed {
+		testRTCOnly(t, httpClient, origin, hub)
+		b.close()
+		restored.close()
+		testRTCOfferRejections(t, httpClient, origin, s)
 	}
 	t.Logf("real HTTP/3: room %s, two players, input/snapshot datagrams, server hit/kill, winner, resume and origin rejection verified", code)
 }

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/LankiYang/golden-hour/internal/game"
+	"github.com/pion/webrtc/v4"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	webtransport "github.com/quic-go/webtransport-go"
@@ -29,6 +30,8 @@ type Config struct {
 	Dev                                       bool
 	TLS                                       *tls.Config
 	Origins                                   []string
+	RTCAddr, RTCPublicIP                      string
+	ICEServers                                []webrtc.ICEServer
 }
 type Server struct {
 	Hub       *game.Hub
@@ -36,10 +39,12 @@ type Server struct {
 	WT        *webtransport.Server
 	HTTP, TCP *http.Server
 	sessions  atomic.Int32
+	rtc       *rtcServer
 }
 
 func New(hub *game.Hub, c Config) *Server {
 	s := &Server{Hub: hub, config: c}
+	s.rtc = newRTCServer(s)
 	mux := http.NewServeMux()
 	h3 := &http3.Server{Addr: c.Addr, TLSConfig: http3.ConfigureTLSConfig(c.TLS), Handler: mux, QUICConfig: &quic.Config{EnableDatagrams: true, EnableStreamResetPartialDelivery: true, MaxIncomingStreams: 4, MaxIncomingUniStreams: 4, MaxIdleTimeout: 25 * time.Second, KeepAlivePeriod: 5 * time.Second, InitialStreamReceiveWindow: 64 << 10, MaxStreamReceiveWindow: 128 << 10, MaxConnectionReceiveWindow: 512 << 10}}
 	webtransport.ConfigureHTTP3Server(h3)
@@ -49,11 +54,17 @@ func New(hub *game.Hub, c Config) *Server {
 		MaxIncomingStreams: 4, MaxIncomingUniStreams: 4, MaxIncomingData: 256 << 10,
 	}}
 	mux.HandleFunc("/connect", s.connect)
+	mux.HandleFunc("/api/rtc/offer", s.rtc.offer)
 	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		s.json(w, game.Event{"url": strings.TrimRight(c.PublicURL, "/") + "/connect", "certificateHash": c.CertHash, "development": c.Dev, "protocol": 1, "tickRate": game.TickRate})
+		s.json(w, game.Event{"url": strings.TrimRight(c.PublicURL, "/") + "/connect", "certificateHash": c.CertHash, "development": c.Dev, "protocol": 1, "tickRate": game.TickRate,
+			"rtc": game.Event{"url": "/api/rtc/offer", "iceServers": c.ICEServers}})
 	})
-	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) { s.json(w, hub.Info()) })
+	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+		info := hub.Info()
+		info["transports"] = []string{"webtransport", "webrtc"}
+		s.json(w, info)
+	})
 	assets, err := loadStatic(c.Root)
 	if err != nil {
 		panic(fmt.Errorf("load game assets: %w", err))
@@ -92,6 +103,9 @@ func (s *Server) originOK(r *http.Request) bool {
 	return err == nil && u.Scheme == "https" && u.Host == r.Host
 }
 func (s *Server) Run(ctx context.Context) error {
+	if err := s.rtc.start(); err != nil {
+		return err
+	}
 	errCh := make(chan error, 3)
 	go func() { errCh <- s.WT.ListenAndServe() }()
 	go func() { errCh <- s.TCP.ListenAndServeTLS("", "") }()
@@ -117,6 +131,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 func (s *Server) Close() {
+	s.rtc.close()
 	s.WT.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
