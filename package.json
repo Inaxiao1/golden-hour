@@ -1,0 +1,12 @@
+{
+  "name": "golden-hour-pvp",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "go run ./cmd/server",
+    "test": "node --test client/*.test.js",
+    "export-map": "node tools/export-map.mjs",
+    "bake-startup": "node tools/bake-startup.mjs",
+    "optimize": "node tools/optimize-renderer.mjs && node tools/optimize-startup.mjs"
+  }
+}
