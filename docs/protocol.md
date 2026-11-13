@@ -11,6 +11,16 @@ Endpoint: `https://<host>/connect`. TLS 1.3 and HTTP/3 over UDP are mandatory. T
 5. Datagram input contains intent only. The 60 Hz server clock advances simulation; additional packets do not advance time. At 30 Hz a new snapshot replaces any older pending snapshot instead of blocking the tick.
 6. Disconnects retain human seats for 20 seconds and AI controls them during that grace period. Resume increments the binding generation, so an older connection's disconnect cannot remove the restored player.
 
+## Browser interoperability and deadlines
+
+The server advertises nonzero `SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI` (`0x2b65`), `SETTINGS_WT_INITIAL_MAX_STREAMS_UNI` (`0x2b64`) and `SETTINGS_WT_INITIAL_MAX_DATA` (`0x2b61`), in addition to `SETTINGS_WT_MAX_SESSIONS`. Initial session limits are 4 bidirectional streams, 4 unidirectional streams and 256 KiB of incoming data. QUIC connection limits alone do not grant session credit: Safari can complete the CONNECT handshake but wait indefinitely before opening the room stream if session credit is absent. Peers without session flow control retain the library's legacy behavior.
+
+The client detects either `datagrams.writable` or the newer `datagrams.createWritable()` API. Incoming snapshot buffers can be typed arrays or ArrayBuffers; their wire format is identical. Capability checks precede scene activation. Config retrieval has a 5-second deadline; one 12-second deadline covers transport readiness, bidirectional stream creation, the hello write and welcome. Leaving has a 500-millisecond deadline covering both the write and confirmation, then releases local state even if the browser never resolves its write. A late stream from a timed-out attempt cannot restore that session.
+
+Tests inspect initial credit SETTINGS received over real HTTP/3, run a match with modern flow-controlled and legacy peers, and exercise stalled connection stages, bounded cleanup, retries and the newer datagram API with ArrayBuffer snapshots.
+
+Manual verification on macOS Safari 27.0 at `http://localhost:8080/`: created a room with one human and nine server bots, readied and started a match, moved and fired (magazine 30 → 25), observed live scores, then left and verified room cleanup. The previously stalled connection also restored both join buttons on timeout.
+
 ## Reliable messages
 
 Client → server examples:

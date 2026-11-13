@@ -43,7 +43,11 @@ func New(hub *game.Hub, c Config) *Server {
 	mux := http.NewServeMux()
 	h3 := &http3.Server{Addr: c.Addr, TLSConfig: http3.ConfigureTLSConfig(c.TLS), Handler: mux, QUICConfig: &quic.Config{EnableDatagrams: true, EnableStreamResetPartialDelivery: true, MaxIncomingStreams: 4, MaxIncomingUniStreams: 4, MaxIdleTimeout: 25 * time.Second, KeepAlivePeriod: 5 * time.Second, InitialStreamReceiveWindow: 64 << 10, MaxStreamReceiveWindow: 128 << 10, MaxConnectionReceiveWindow: 512 << 10}}
 	webtransport.ConfigureHTTP3Server(h3)
-	s.WT = &webtransport.Server{H3: h3, CheckOrigin: s.originOK}
+	// QUIC stream limits do not grant WebTransport session credit. Safari waits
+	// for explicit initial stream/data SETTINGS before opening the room stream.
+	s.WT = &webtransport.Server{H3: h3, CheckOrigin: s.originOK, Config: &webtransport.Config{
+		MaxIncomingStreams: 4, MaxIncomingUniStreams: 4, MaxIncomingData: 256 << 10,
+	}}
 	mux.HandleFunc("/connect", s.connect)
 	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")

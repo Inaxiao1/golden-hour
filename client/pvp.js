@@ -197,7 +197,11 @@ async function join(create) {
   visible("online-error", false);
   status("正在连接战场…");
   try {
-    const response = await fetch("/api/config", { cache: "no-store" });
+    net.checkSupport();
+    const response = await fetch("/api/config", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(5000),
+    });
     if (!response.ok) throw Error("联机服务未启动，请通过 Go 服务打开游戏。");
     const config = await response.json();
     await engine.enter(ctx.settings.primary);

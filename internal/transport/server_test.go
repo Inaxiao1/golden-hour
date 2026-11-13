@@ -17,6 +17,8 @@ import (
 
 	"github.com/LankiYang/golden-hour/internal/certutil"
 	"github.com/LankiYang/golden-hour/internal/game"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	webtransport "github.com/quic-go/webtransport-go"
 )
 
@@ -105,6 +107,30 @@ func TestRealWebTransportTwoClients(t *testing.T) {
 	if !ready {
 		t.Fatal("HTTPS not listening")
 	}
+	t.Run("advertise session credit for Safari over HTTP3", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		conn, err := quic.DialAddrEarly(ctx, addr, &tls.Config{RootCAs: pool, NextProtos: []string{http3.NextProtoH3}}, &quic.Config{EnableDatagrams: true, EnableStreamResetPartialDelivery: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.CloseWithError(0, "")
+		transport := &http3.Transport{EnableDatagrams: true}
+		defer transport.Close()
+		client := transport.NewClientConn(conn)
+		select {
+		case <-client.ReceivedSettings():
+		case <-ctx.Done():
+			t.Fatal("HTTP/3 SETTINGS did not arrive")
+		}
+		// Wire identifiers from draft-ietf-webtrans-http3: a connected session
+		// still cannot open its first stream if either initial credit is absent.
+		for _, id := range []uint64{0x14e9cd29, 0x2b65, 0x2b61} {
+			if client.Settings().Other[id] == 0 {
+				t.Errorf("WebTransport initial credit setting %#x missing or zero", id)
+			}
+		}
+	})
 	for _, path := range []string{"/.git/config", "/.local/dev-key.pem", "/cmd/server/main.go"} {
 		resp, err := httpClient.Get(origin + path)
 		if err != nil {
@@ -115,9 +141,12 @@ func TestRealWebTransportTwoClients(t *testing.T) {
 			t.Fatalf("private path %s exposed: %d", path, resp.StatusCode)
 		}
 	}
-	dial := func(hello game.Hello) *client {
+	dial := func(hello game.Hello, config ...*webtransport.Config) *client {
 		t.Helper()
 		tr := &webtransport.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
+		if len(config) > 0 {
+			tr.Config = config[0]
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 		defer cancel()
 		_, sess, err := tr.Dial(ctx, origin+"/connect", http.Header{"Origin": []string{origin}})
@@ -132,7 +161,8 @@ func TestRealWebTransportTwoClients(t *testing.T) {
 		c.send(t, hello)
 		return c
 	}
-	a := dial(game.Hello{Type: "hello", Create: true, Name: "Alice"})
+	// Exercise both modern session flow control and legacy peers in one match.
+	a := dial(game.Hello{Type: "hello", Create: true, Name: "Alice"}, &webtransport.Config{MaxIncomingStreams: 4, MaxIncomingUniStreams: 4, MaxIncomingData: 256 << 10})
 	defer a.close()
 	welcome := a.event(t, "welcome")
 	code := welcome["room"].(string)

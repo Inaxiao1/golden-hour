@@ -18,6 +18,8 @@ go run ./cmd/server
 
 限制鼠标锁定的内嵌窗口会自动切换到拖动瞄准，避免开局停在暂停页；按住鼠标拖动视角。独立浏览器使用标准 Pointer Lock。移动端触屏双摇杆尚未实现。
 
+联机客户端兼容 `datagrams.writable` 和 Safari 较新的 `datagrams.createWritable()` 接口，并接收 TypedArray / ArrayBuffer 快照。服务器显式通告 WebTransport 会话的初始流与数据额度，避免 Safari 在握手后一直等待流创建。配置请求最多等待 5 秒，完整联机建链最多 12 秒；失败后恢复按钮，退出操作最多等待 500 毫秒，不会因挂起的网络写入一直置灰。
+
 ## 已实现
 
 - 原生主菜单联机入口、原生枪匠装备、原生暂停页和战斗 HUD；没有独立悬浮入口或替换 HUD。

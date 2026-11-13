@@ -14,6 +14,20 @@ const COUNTER_FIELDS = [
   "reload",
 ];
 
+async function deadline(operation, timeout, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Error(message)), timeout);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Movement datagrams are fixed-size binary packets. This removes JSON parsing
 // and UTF-8 allocation from the 30 Hz input path while the server still accepts
 // JSON for older clients during rolling upgrades.
@@ -31,6 +45,7 @@ export function encodeInput(input, bytes = new Uint8Array(INPUT_BYTES)) {
   return bytes;
 }
 export function decodeSnapshot(bytes) {
+  if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
   if (bytes.byteLength < 24) return null;
   const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (
@@ -79,8 +94,10 @@ export function decodeSnapshot(bytes) {
 }
 
 export class Connection extends EventTarget {
-  constructor() {
+  constructor({ connectTimeoutMs = 12000, leaveTimeoutMs = 500 } = {}) {
     super();
+    this.connectTimeoutMs = connectTimeoutMs;
+    this.leaveTimeoutMs = leaveTimeoutMs;
     this.generation = 0;
     this.intentional = true;
     this.sendChain = Promise.resolve();
@@ -99,18 +116,21 @@ export class Connection extends EventTarget {
   emit(type, detail) {
     this.dispatchEvent(new CustomEvent(type, { detail }));
   }
-  async connect(hello, config) {
-    if (!globalThis.WebTransport)
+  checkSupport() {
+    if (typeof globalThis.WebTransport !== "function")
       throw Error(
         "当前浏览器不支持 WebTransport，请使用最新版本的 Chrome、Edge 或支持 WebTransport 的浏览器。",
       );
     if (!globalThis.isSecureContext)
       throw Error("联机需要 HTTPS。开发时请使用本机 localhost 地址。");
+  }
+  async connect(hello, config) {
+    this.checkSupport();
     this.intentional = false;
     this.hello = { ...hello };
     this.config = config;
     const generation = ++this.generation;
-    this.emit("status", "正在连接");
+    this.emit("status", "正在连接服务器…");
     const options = {};
     if (config.certificateHash) {
       options.serverCertificateHashes = [
@@ -122,47 +142,41 @@ export class Connection extends EventTarget {
         },
       ];
     }
-    const wt = new WebTransport(config.url, options);
-    this.transport = wt;
-    wt.closed.catch(() => {});
-    let timer;
+    let wt;
+    const current = () => {
+      if (generation !== this.generation) throw Error("连接已取消。");
+    };
     try {
-      await Promise.race([
-        wt.ready,
-        new Promise((_, reject) => {
-          timer = setTimeout(
-            () => reject(Error("连接超时：请检查服务器 UDP 端口与证书配置。")),
-            12000,
-          );
-        }),
-      ]);
-      clearTimeout(timer);
-      if (generation !== this.generation) {
-        wt.close();
-        return;
-      }
-      const stream = await wt.createBidirectionalStream();
-      this.writer = stream.writable.getWriter();
-      this.datagrams = wt.datagrams.writable.getWriter();
-      this.sendChain = Promise.resolve();
-      const accepted = new Promise((resolve, reject) => {
-        this.handshake = { generation, resolve, reject };
-      });
-      accepted.catch(() => {});
-      this.readEvents(stream.readable, generation);
-      this.readSnapshots(wt.datagrams.readable, generation);
+      wt = new WebTransport(config.url, options);
+      this.transport = wt;
       wt.closed.catch(() => {});
-      await this.send({ ...hello, type: "hello" });
-      await Promise.race([
-        accepted,
-        new Promise((_, reject) => {
-          timer = setTimeout(
-            () => reject(Error("加入房间超时，请重试。")),
-            10000,
-          );
-        }),
-      ]);
-      clearTimeout(timer);
+      // One deadline covers TLS, stream creation, the hello write and welcome.
+      // Some browsers can leave stream creation or a write pending indefinitely.
+      await deadline(async () => {
+        await wt.ready;
+        current();
+        this.emit("status", "正在建立对战连接…");
+        const stream = await wt.createBidirectionalStream();
+        current();
+        this.writer = stream.writable.getWriter();
+        // Safari implements the newer createWritable() API; Chromium also
+        // exposes the original writable stream. Both carry QUIC datagrams.
+        const outgoing = wt.datagrams.writable ?? wt.datagrams.createWritable?.();
+        if (!outgoing?.getWriter)
+          throw Error("当前浏览器缺少 WebTransport 数据报支持，请更新浏览器后重试。");
+        this.datagrams = outgoing.getWriter();
+        this.sendChain = Promise.resolve();
+        const accepted = new Promise((resolve, reject) => {
+          this.handshake = { generation, resolve, reject };
+        });
+        accepted.catch(() => {});
+        this.readEvents(stream.readable, generation);
+        this.readSnapshots(wt.datagrams.readable, generation);
+        this.emit("status", "正在加入房间…");
+        await this.send({ ...hello, type: "hello" });
+        await accepted;
+        current();
+      }, this.connectTimeoutMs, "连接超时：请重试，并检查服务器 UDP 端口与证书配置。");
       this.handshake = null;
       this.retry = 0;
       this.emit("status", "已连接");
@@ -171,11 +185,16 @@ export class Connection extends EventTarget {
         () => this.closed(generation),
       );
     } catch (error) {
-      clearTimeout(timer);
-      this.handshake = null;
-      wt.close();
-      this.writer = null;
-      this.datagrams = null;
+      if (generation === this.generation) {
+        this.generation++;
+        this.handshake?.reject(error);
+        this.handshake = null;
+        this.writer = null;
+        this.datagrams = null;
+        this.transport = null;
+        this.sendChain = Promise.resolve();
+      }
+      try { wt?.close(); } catch {}
       throw error;
     }
   }
@@ -207,7 +226,7 @@ export class Connection extends EventTarget {
     try {
       while (generation === this.generation) {
         const { value, done } = await reader.read();
-        if (done) break;
+        if (done || generation !== this.generation) break;
         buffer += decoder.decode(value, { stream: true });
         if (buffer.length > 65536) throw Error("可靠流消息过大");
         let n;
@@ -251,7 +270,7 @@ export class Connection extends EventTarget {
     try {
       while (generation === this.generation) {
         const { value, done } = await reader.read();
-        if (done) break;
+        if (done || generation !== this.generation) break;
         const snapshot = decodeSnapshot(value);
         if (snapshot && snapshot.tick > this.latestTick) {
           this.metrics.snapshots++;
@@ -300,19 +319,20 @@ export class Connection extends EventTarget {
         this.leftResolve = resolve;
       });
       try {
-        await this.send({ type: "leave" });
-        await Promise.race([
-          accepted,
-          new Promise((resolve) => setTimeout(resolve, 500)),
-        ]);
+        await deadline(async () => {
+          await this.send({ type: "leave" });
+          await accepted;
+        }, this.leaveTimeoutMs, "退出房间超时。");
       } catch {}
     }
     this.leftResolve = null;
     this.generation++;
-    this.transport?.close();
+    try { this.transport?.close(); } catch {}
+    this.transport = null;
     this.writer = null;
     this.datagrams = null;
     this.id = null;
     this.hello = null;
+    this.sendChain = Promise.resolve();
   }
 }
